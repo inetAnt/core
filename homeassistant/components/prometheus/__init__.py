@@ -29,6 +29,7 @@ from homeassistant.const import (
     PERCENTAGE,
     STATE_ON,
     STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
     TEMP_CELSIUS,
     TEMP_FAHRENHEIT,
 )
@@ -49,6 +50,7 @@ CONF_COMPONENT_CONFIG_GLOB = "component_config_glob"
 CONF_COMPONENT_CONFIG_DOMAIN = "component_config_domain"
 CONF_DEFAULT_METRIC = "default_metric"
 CONF_OVERRIDE_METRIC = "override_metric"
+CONF_SKIP_UNKNOWN = "skip_unknown"
 COMPONENT_CONFIG_SCHEMA_ENTRY = vol.Schema(
     {vol.Optional(CONF_OVERRIDE_METRIC): cv.string}
 )
@@ -61,6 +63,7 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional(CONF_PROM_NAMESPACE): cv.string,
                 vol.Optional(CONF_DEFAULT_METRIC): cv.string,
                 vol.Optional(CONF_OVERRIDE_METRIC): cv.string,
+                vol.Optional(CONF_SKIP_UNKNOWN, default=False): cv.boolean,
                 vol.Optional(CONF_COMPONENT_CONFIG, default={}): vol.Schema(
                     {cv.entity_id: COMPONENT_CONFIG_SCHEMA_ENTRY}
                 ),
@@ -87,6 +90,7 @@ def setup(hass, config):
     climate_units = hass.config.units.temperature_unit
     override_metric = conf.get(CONF_OVERRIDE_METRIC)
     default_metric = conf.get(CONF_DEFAULT_METRIC)
+    skip_unknown = conf.get(CONF_SKIP_UNKNOWN)
     component_config = EntityValues(
         conf[CONF_COMPONENT_CONFIG],
         conf[CONF_COMPONENT_CONFIG_DOMAIN],
@@ -101,6 +105,7 @@ def setup(hass, config):
         component_config,
         override_metric,
         default_metric,
+        skip_unknown,
     )
 
     hass.bus.listen(EVENT_STATE_CHANGED, metrics.handle_event)
@@ -119,12 +124,14 @@ class PrometheusMetrics:
         component_config,
         override_metric,
         default_metric,
+        skip_unknown,
     ):
         """Initialize Prometheus Metrics."""
         self.prometheus_cli = prometheus_cli
         self._component_config = component_config
         self._override_metric = override_metric
         self._default_metric = default_metric
+        self._skip_unknown = skip_unknown
         self._filter = entity_filter
         self._sensor_metric_handlers = [
             self._sensor_override_component_metric,
@@ -154,9 +161,13 @@ class PrometheusMetrics:
         if not self._filter(state.entity_id):
             return
 
+        ignored_states = [STATE_UNAVAILABLE]
+        if self._skip_unknown:
+            ignored_states.append(STATE_UNKNOWN)
+
         handler = f"_handle_{domain}"
 
-        if hasattr(self, handler) and state.state != STATE_UNAVAILABLE:
+        if hasattr(self, handler) and state.state not in ignored_states:
             getattr(self, handler)(state)
 
         labels = self._labels(state)
@@ -170,7 +181,7 @@ class PrometheusMetrics:
             self.prometheus_cli.Gauge,
             "Entity is available (not in the unavailable state)",
         )
-        entity_available.labels(**labels).set(float(state.state != STATE_UNAVAILABLE))
+        entity_available.labels(**labels).set(float(state.state not in ignored_states))
 
         last_updated_time_seconds = self._metric(
             "last_updated_time_seconds",
